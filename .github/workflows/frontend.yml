@@ -1,0 +1,14 @@
+on:
+  push:
+    paths:
+      - 'frontend/**'
+
+jobs:
+  build-deploy-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install deps
+        run: cd frontend && npm Install
+      - name: Build 
+      

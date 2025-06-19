@@ -1,0 +1,14 @@
+on:
+  push:
+    paths:
+      - 'backend/**'
+jobs:
+  build-deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install & Deploy  
+        run: |
+          cd backend
+          npm install
+          sls deploy --stage prod
