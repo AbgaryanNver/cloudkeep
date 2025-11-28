@@ -1,6 +1,20 @@
+// Mock aws-jwt-verify before requiring the authorizer
+jest.mock('aws-jwt-verify', () => ({
+  CognitoJwtVerifier: {
+    create: jest.fn(() => ({
+      verify: jest.fn()
+    }))
+  }
+}));
+
 const authorizer = require('../handlers/authorizer');
 
 describe('CloudKeep Backend Tests', () => {
+  beforeEach(() => {
+    // Set development environment for tests
+    process.env.NODE_ENV = 'development';
+  });
+
   describe('Authorizer', () => {
     test('should reject requests without authorization token', async () => {
       const event = {

@@ -257,59 +257,451 @@ npm run lint
 
 ## Deployment
 
-### Deploy Backend to AWS Lambda
+CloudKeep uses **Terraform** for infrastructure provisioning and **Serverless Framework** for Lambda deployment. This section provides complete step-by-step instructions.
+
+### AWS Infrastructure Setup (Terraform)
+
+#### Prerequisites
+
+1. **Terraform** (>= 1.0)
+   ```bash
+   # macOS
+   brew install terraform
+
+   # Linux
+   wget https://releases.hashicorp.com/terraform/1.6.0/terraform_1.6.0_linux_amd64.zip
+   unzip terraform_1.6.0_linux_amd64.zip
+   sudo mv terraform /usr/local/bin/
+   ```
+
+2. **AWS CLI** configured with credentials
+   ```bash
+   aws configure
+   # Enter your AWS Access Key ID
+   # Enter your AWS Secret Access Key
+   # Default region: us-east-1
+   # Default output format: json
+   ```
+
+#### Step 1: Create Terraform State Backend
+
+Before deploying infrastructure, create S3 bucket and DynamoDB table for Terraform state:
 
 ```bash
-cd backend
+# Create S3 bucket for Terraform state
+aws s3 mb s3://cloudkeep-terraform-state --region us-east-1
 
-# Configure AWS credentials
-aws configure
+# Enable versioning on state bucket
+aws s3api put-bucket-versioning \
+  --bucket cloudkeep-terraform-state \
+  --versioning-configuration Status=Enabled
 
+# Enable encryption
+aws s3api put-bucket-encryption \
+  --bucket cloudkeep-terraform-state \
+  --server-side-encryption-configuration '{
+    "Rules": [{
+      "ApplyServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "AES256"
+      }
+    }]
+  }'
+
+# Create DynamoDB table for state locking
+aws dynamodb create-table \
+  --table-name terraform-state-lock \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region us-east-1
+```
+
+#### Step 2: Initialize Terraform
+
+```bash
+cd terraform
+terraform init
+```
+
+Expected output:
+```
+Initializing modules...
+Initializing the backend...
+Terraform has been successfully initialized!
+```
+
+#### Step 3: Review Infrastructure Plan
+
+```bash
+# Development environment
+terraform plan -var-file=environments/dev/terraform.tfvars
+
+# Staging environment
+terraform plan -var-file=environments/staging/terraform.tfvars
+
+# Production environment
+terraform plan -var-file=environments/prod/terraform.tfvars
+```
+
+This will show you all resources that will be created:
+- VPC with public/private subnets
+- NAT Gateways
+- Security Groups
+- Cognito User Pool
+- S3 Bucket
+- DynamoDB Table
+- ElastiCache Cluster
+- Application Load Balancer
+- API Gateway
+
+#### Step 4: Deploy Infrastructure
+
+```bash
+# Deploy development infrastructure
+terraform apply -var-file=environments/dev/terraform.tfvars
+
+# Type 'yes' when prompted to confirm
+```
+
+Deployment takes approximately **10-15 minutes**. Resources created:
+- ✅ VPC across 3 availability zones
+- ✅ 3 NAT Gateways
+- ✅ Cognito User Pool
+- ✅ S3 bucket with encryption
+- ✅ DynamoDB table
+- ✅ ElastiCache Redis cluster
+- ✅ Application Load Balancer
+- ✅ Security Groups
+- ✅ VPC Endpoints
+
+#### Step 5: Save Terraform Outputs
+
+```bash
+# View all outputs
+terraform output
+
+# Save to file for reference
+terraform output -json > terraform-outputs.json
+
+# Get specific values
+terraform output cognito_user_pool_id
+terraform output cognito_user_pool_client_id
+terraform output s3_bucket_name
+terraform output dynamodb_table_name
+terraform output api_gateway_url
+terraform output elasticache_endpoint
+terraform output alb_dns_name
+```
+
+**Important**: Save these values - you'll need them for backend and frontend configuration.
+
+### Backend Deployment (Serverless Framework)
+
+#### Step 1: Configure Backend Environment
+
+Create `backend/.env` file with Terraform outputs:
+
+```bash
+cd ../backend
+
+cat > .env << EOF
+# AWS Configuration
+AWS_REGION=us-east-1
+NODE_ENV=production
+
+# From Terraform outputs
+USER_POOL_ID=$(cd ../terraform && terraform output -raw cognito_user_pool_id)
+USER_POOL_CLIENT_ID=$(cd ../terraform && terraform output -raw cognito_user_pool_client_id)
+BUCKET_NAME=$(cd ../terraform && terraform output -raw s3_bucket_name)
+DYNAMODB_TABLE=$(cd ../terraform && terraform output -raw dynamodb_table_name)
+ELASTICACHE_ENDPOINT=$(cd ../terraform && terraform output -raw elasticache_endpoint)
+EOF
+```
+
+#### Step 2: Update Serverless Configuration
+
+The `serverless.yml` should reference the Terraform-created resources:
+
+```yaml
+# This configuration is already set up in backend/serverless.yml
+# Verify it matches your Terraform outputs
+```
+
+#### Step 3: Install Serverless Framework
+
+```bash
+npm install -g serverless
+```
+
+#### Step 4: Deploy Lambda Functions
+
+```bash
 # Deploy to development
-npm run deploy:dev
+serverless deploy --stage dev --region us-east-1
 
 # Deploy to staging
-npm run deploy:staging
+serverless deploy --stage staging --region us-east-1
 
 # Deploy to production
-npm run deploy:prod
+serverless deploy --stage production --region us-east-1
 ```
 
-### Deploy Frontend to AWS S3
+Deployment creates:
+- ✅ 6 Lambda functions (upload, download, list, delete, share, authorizer)
+- ✅ API Gateway endpoints
+- ✅ Lambda execution roles
+- ✅ CloudWatch log groups
+
+#### Step 5: Test Backend API
 
 ```bash
-cd frontend
+# Get API endpoint from deployment output
+API_URL="<your-api-gateway-url>"
 
-# Build production bundle
-npm run build
+# Test health endpoint
+curl $API_URL/health
 
-# Deploy to S3 (replace with your bucket name)
-aws s3 sync build/ s3://cloudkeep-frontend-production --delete
-
-# Invalidate CloudFront cache (if using CloudFront)
-aws cloudfront create-invalidation --distribution-id YOUR_DISTRIBUTION_ID --paths "/*"
+# Expected response:
+# {"status":"healthy","service":"cloudkeep-backend","timestamp":"..."}
 ```
+
+### Frontend Deployment
+
+#### Step 1: Configure Frontend
+
+Create `frontend/src/aws-config.js`:
+
+```bash
+cd ../frontend
+
+cat > src/aws-config.js << 'EOF'
+const awsconfig = {
+  Auth: {
+    Cognito: {
+      region: 'us-east-1',
+      userPoolId: process.env.REACT_APP_USER_POOL_ID,
+      userPoolClientId: process.env.REACT_APP_USER_POOL_CLIENT_ID,
+    }
+  },
+  API: {
+    endpoints: [
+      {
+        name: 'CloudKeepAPI',
+        endpoint: process.env.REACT_APP_API_URL,
+        region: 'us-east-1'
+      }
+    ]
+  }
+};
+
+export default awsconfig;
+EOF
+```
+
+#### Step 2: Create Environment File
+
+```bash
+# Get values from Terraform
+cd ../terraform
+
+cat > ../frontend/.env.production << EOF
+REACT_APP_USER_POOL_ID=$(terraform output -raw cognito_user_pool_id)
+REACT_APP_USER_POOL_CLIENT_ID=$(terraform output -raw cognito_user_pool_client_id)
+REACT_APP_API_URL=$(cd ../backend && serverless info --stage production | grep "endpoint:" | awk '{print $2}')
+REACT_APP_STAGE=production
+EOF
+```
+
+#### Step 3: Build Frontend
+
+```bash
+cd ../frontend
+
+# Install dependencies
+npm install
+
+# Build for production
+npm run build
+```
+
+#### Step 4: Deploy to S3
+
+```bash
+# Get S3 bucket name from Terraform
+S3_BUCKET=$(cd ../terraform && terraform output -raw s3_bucket_name)
+
+# Sync build to S3
+aws s3 sync build/ s3://$S3_BUCKET --delete
+
+# Set proper content types
+aws s3 cp s3://$S3_BUCKET s3://$S3_BUCKET \
+  --recursive \
+  --exclude "*" \
+  --include "*.html" \
+  --content-type "text/html" \
+  --metadata-directive REPLACE
+
+# Configure bucket for static website hosting
+aws s3 website s3://$S3_BUCKET \
+  --index-document index.html \
+  --error-document index.html
+```
+
+#### Step 5: Access Application
+
+```bash
+# Get ALB DNS name
+ALB_DNS=$(cd ../terraform && terraform output -raw alb_dns_name)
+
+echo "Application URL: http://$ALB_DNS"
+```
+
+### Post-Deployment Configuration
+
+#### Configure Cognito
+
+1. **Create Test User**:
+   ```bash
+   aws cognito-idp admin-create-user \
+     --user-pool-id <USER_POOL_ID> \
+     --username testuser@example.com \
+     --user-attributes Name=email,Value=testuser@example.com \
+     --temporary-password TempPass123!
+   ```
+
+2. **Confirm User** (for testing):
+   ```bash
+   aws cognito-idp admin-set-user-password \
+     --user-pool-id <USER_POOL_ID> \
+     --username testuser@example.com \
+     --password MyNewPass123! \
+     --permanent
+   ```
+
+#### Configure Custom Domain (Optional)
+
+1. **Request ACM Certificate**:
+   ```bash
+   aws acm request-certificate \
+     --domain-name cloudkeep.yourdomain.com \
+     --validation-method DNS \
+     --region us-east-1
+   ```
+
+2. **Update Terraform** with certificate ARN:
+   ```hcl
+   # In terraform/environments/prod/terraform.tfvars
+   acm_certificate_arn = "arn:aws:acm:us-east-1:..."
+   ```
+
+3. **Re-apply Terraform**:
+   ```bash
+   terraform apply -var-file=environments/prod/terraform.tfvars
+   ```
+
+4. **Create Route53 Record**:
+   ```bash
+   aws route53 change-resource-record-sets \
+     --hosted-zone-id <YOUR_ZONE_ID> \
+     --change-batch file://dns-record.json
+   ```
 
 ### Automated Deployment with GitHub Actions
 
 The project includes CI/CD workflows:
 
-- **Build Workflow** (`.github/workflows/build.yml`): Runs on every push/PR
-  - Builds and tests backend and frontend
-  - Creates Docker images
-  - Runs security scans
+#### Build Workflow (`.github/workflows/build.yml`)
+Runs on every push/PR:
+- ✅ Builds and tests backend and frontend
+- ✅ Creates Docker images
+- ✅ Runs security scans
+- ✅ Linting and code quality checks
 
-- **Deploy Workflow** (`.github/workflows/deploy.yml`): Runs on main/develop branches
-  - Deploys backend to AWS Lambda
-  - Deploys frontend to S3
-  - Publishes Docker images
+#### Deploy Workflow (`.github/workflows/deploy.yml`)
+Runs on main/develop branches:
+- ✅ Deploys backend to AWS Lambda
+- ✅ Deploys frontend to S3
+- ✅ Publishes Docker images
+- ✅ Invalidates CloudFront cache
 
-**Required GitHub Secrets:**
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `DOCKER_USERNAME`
-- `DOCKER_PASSWORD`
-- `CLOUDFRONT_DISTRIBUTION_ID`
+#### Required GitHub Secrets
+
+Configure these in your repository settings (Settings → Secrets → Actions):
+
+```bash
+# AWS Credentials
+AWS_ACCESS_KEY_ID=<your-access-key>
+AWS_SECRET_ACCESS_KEY=<your-secret-key>
+
+# Docker Hub (for Docker image publishing)
+DOCKER_USERNAME=<your-docker-username>
+DOCKER_PASSWORD=<your-docker-password>
+
+# CloudFront (if using)
+CLOUDFRONT_DISTRIBUTION_ID=<your-distribution-id>
+
+# Cognito (from Terraform outputs)
+USER_POOL_ID=<from-terraform>
+USER_POOL_CLIENT_ID=<from-terraform>
+```
+
+### Monitoring and Logs
+
+#### View Lambda Logs
+
+```bash
+# List log groups
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/cloudkeep
+
+# Tail logs for upload function
+serverless logs -f uploadFile --tail --stage production
+
+# View last 100 lines
+serverless logs -f uploadFile --tail --stage production --startTime 1h
+```
+
+#### View API Gateway Logs
+
+```bash
+# Enable API Gateway logging (one-time setup)
+aws apigateway update-stage \
+  --rest-api-id <API_ID> \
+  --stage-name production \
+  --patch-operations op=replace,path=/accessLogSettings/destinationArn,value=<LOG_ARN>
+```
+
+#### CloudWatch Dashboard
+
+Create a dashboard to monitor:
+- Lambda invocations and errors
+- API Gateway requests and latency
+- S3 bucket operations
+- DynamoDB read/write capacity
+- ElastiCache hit/miss ratio
+
+### Cost Estimation
+
+**Monthly costs for development environment:**
+
+| Service | Usage | Est. Cost |
+|---------|-------|-----------|
+| VPC & NAT Gateway | 1 NAT (dev) | ~$32 |
+| ElastiCache | t3.micro | ~$12 |
+| S3 | 10 GB storage | ~$0.23 |
+| DynamoDB | On-demand, low traffic | ~$1-5 |
+| Lambda | 1M requests | ~$0.20 |
+| API Gateway | 1M requests | ~$3.50 |
+| CloudWatch Logs | 5 GB | ~$2.50 |
+| **Total** | | **~$51/month** |
+
+**Production environment** (3 NAT Gateways, larger ElastiCache): **~$150-200/month**
+
+**Cost optimization tips:**
+- Use single NAT Gateway for dev
+- Use t3.micro for ElastiCache in dev
+- Enable S3 lifecycle policies
+- Use DynamoDB on-demand billing
+- Set CloudWatch log retention to 7 days for dev
 
 ## API Documentation
 
