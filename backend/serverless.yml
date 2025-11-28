@@ -1,0 +1,155 @@
+service: cloudkeep-backend
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    STAGE: ${self:provider.stage}
+    BUCKET_NAME: ${self:custom.bucketName}
+    DYNAMODB_TABLE: ${self:custom.tableName}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::${self:custom.bucketName}/*
+            - arn:aws:s3:::${self:custom.bucketName}
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/${self:custom.tableName}
+
+custom:
+  bucketName: cloudkeep-files-${self:provider.stage}
+  tableName: cloudkeep-metadata-${self:provider.stage}
+
+functions:
+  uploadFile:
+    handler: handlers/upload.handler
+    events:
+      - http:
+          path: /upload
+          method: post
+          cors: true
+          authorizer:
+            name: authorizer
+            resultTtlInSeconds: 300
+
+  downloadFile:
+    handler: handlers/download.handler
+    events:
+      - http:
+          path: /download/{fileId}
+          method: get
+          cors: true
+          authorizer:
+            name: authorizer
+            resultTtlInSeconds: 300
+
+  listFiles:
+    handler: handlers/list.handler
+    events:
+      - http:
+          path: /files
+          method: get
+          cors: true
+          authorizer:
+            name: authorizer
+            resultTtlInSeconds: 300
+
+  deleteFile:
+    handler: handlers/delete.handler
+    events:
+      - http:
+          path: /files/{fileId}
+          method: delete
+          cors: true
+          authorizer:
+            name: authorizer
+            resultTtlInSeconds: 300
+
+  shareFile:
+    handler: handlers/share.handler
+    events:
+      - http:
+          path: /share/{fileId}
+          method: post
+          cors: true
+          authorizer:
+            name: authorizer
+            resultTtlInSeconds: 300
+
+  authorizer:
+    handler: handlers/authorizer.handler
+
+resources:
+  Resources:
+    FilesBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketName}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteOldVersions
+              Status: Enabled
+              NoncurrentVersionExpirationInDays: 30
+        VersioningConfiguration:
+          Status: Enabled
+
+    MetadataTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: fileId
+            AttributeType: S
+          - AttributeName: uploadDate
+            AttributeType: N
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: fileId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: FilesByDate
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: uploadDate
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+plugins:
+  - serverless-offline
