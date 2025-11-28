@@ -1,3 +1,12 @@
+const { CognitoJwtVerifier } = require("aws-jwt-verify");
+
+// Configure the verifier
+const verifier = process.env.USER_POOL_ID ? CognitoJwtVerifier.create({
+  userPoolId: process.env.USER_POOL_ID,
+  tokenUse: "access",
+  clientId: process.env.USER_POOL_CLIENT_ID,
+}) : null;
+
 exports.handler = async (event) => {
   try {
     const token = event.authorizationToken;
@@ -9,17 +18,30 @@ exports.handler = async (event) => {
     // Extract token from "Bearer <token>" format
     const tokenValue = token.replace('Bearer ', '');
 
-    // Simple token validation (in production, use JWT verification)
-    // For demo purposes, accept any token that starts with "cloudkeep-"
-    if (!tokenValue.startsWith('cloudkeep-')) {
-      throw new Error('Unauthorized');
+    // For development/testing: Simple token validation
+    if (process.env.NODE_ENV === 'development' && tokenValue.startsWith('cloudkeep-')) {
+      const userId = tokenValue.replace('cloudkeep-', '') || 'demo-user';
+      return generatePolicy(userId, 'Allow', event.methodArn);
     }
 
-    // Extract userId from token (in production, decode from JWT)
-    const userId = tokenValue.replace('cloudkeep-', '') || 'demo-user';
-
-    // Generate IAM policy
-    return generatePolicy(userId, 'Allow', event.methodArn);
+    // Production: Verify Cognito JWT token
+    if (verifier) {
+      try {
+        const payload = await verifier.verify(tokenValue);
+        const userId = payload.sub || payload.username;
+        return generatePolicy(userId, 'Allow', event.methodArn);
+      } catch (error) {
+        console.error('Token verification failed:', error);
+        throw new Error('Unauthorized');
+      }
+    } else {
+      // Fallback for simple token validation
+      if (!tokenValue.startsWith('cloudkeep-')) {
+        throw new Error('Unauthorized');
+      }
+      const userId = tokenValue.replace('cloudkeep-', '') || 'demo-user';
+      return generatePolicy(userId, 'Allow', event.methodArn);
+    }
   } catch (error) {
     console.error('Authorization error:', error);
     throw new Error('Unauthorized');
